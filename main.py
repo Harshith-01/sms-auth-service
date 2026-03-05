@@ -28,6 +28,7 @@ app.add_exception_handler(
 )
 
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "").split(",")
+ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "").split(",")
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,7 +40,7 @@ app.add_middleware(
 
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=["localhost", "127.0.0.1"]
+    allowed_hosts=ALLOWED_HOSTS if ALLOWED_HOSTS[0] else ["localhost", "127.0.0.1"]
 )
 
 app.include_router(router)

@@ -23,8 +23,10 @@ def get_db():
 @router.post("/create-admin", status_code=status.HTTP_201_CREATED, response_model=Token)
 @limiter.limit("5/minute")
 def create_admin(request: Request, admin_data: AdminCreate, db: Session = Depends(get_db)):
+    normalized_email = admin_data.email.lower().strip()
+
     try:
-        existing_user = db.query(User).filter(User.email == admin_data.email).first()
+        existing_user = db.query(User).filter(User.email == normalized_email).first()
         if existing_user:
             raise HTTPException(status_code=409, detail="Email already registered")
 
@@ -35,7 +37,7 @@ def create_admin(request: Request, admin_data: AdminCreate, db: Session = Depend
 
         new_user = User(
             id=user_id,
-            email=admin_data.email,
+            email=normalized_email,
             hashed_password=hashed_password,
             is_active=True
         )
@@ -62,6 +64,10 @@ def create_admin(request: Request, admin_data: AdminCreate, db: Session = Depend
         token = create_access_token(data={"sub": user_id, "role": "ADMIN"})
         return {"access_token": token, "token_type": "bearer", "role": "ADMIN"}
 
+    except HTTPException:
+        db.rollback()
+        raise
+
     except SQLAlchemyError:
         db.rollback()
         raise HTTPException(status_code=500, detail="Database error")
@@ -69,10 +75,13 @@ def create_admin(request: Request, admin_data: AdminCreate, db: Session = Depend
 @router.post("/login", response_model=Token)
 @limiter.limit("10/minute")
 def login(request: Request, user_data: UserLogin, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == user_data.email).first()
+    user = db.query(User).filter(User.email == user_data.email.lower().strip()).first()
 
     if not user or not verify_password(user_data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="User account is inactive")
 
     user_role = (
         db.query(Role.role_name)
