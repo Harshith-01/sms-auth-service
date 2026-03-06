@@ -1,0 +1,54 @@
+stages:
+  - validate
+  - build
+  - deploy
+
+variables:
+  DOCKER_TLS_CERTDIR: ""
+
+validate:
+  stage: validate
+  image: python:3.11-slim
+  script:
+    - python --version
+    - pip install --no-cache-dir -r requirements.txt
+    - python -m compileall .
+
+build:
+  stage: build
+  image: docker:24.0.9
+  services:
+    - name: docker:24.0.9-dind
+      command: ["--tls=false"]
+  needs: ["validate"]
+  before_script:
+    - docker info
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - docker build -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" .
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "main" ]; then
+        docker tag "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" "$CI_REGISTRY_IMAGE:latest"
+        docker push "$CI_REGISTRY_IMAGE:latest"
+      fi
+
+deploy:
+  stage: deploy
+  image: alpine:3.20
+  needs: ["build"]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+  before_script:
+    - apk add --no-cache openssh-client bash
+    - eval "$(ssh-agent -s)"
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - echo "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+  script:
+    - |
+      ssh "$DEPLOY_USER@$DEPLOY_HOST" \
+      "export CI_REGISTRY_IMAGE='$CI_REGISTRY_IMAGE' IMAGE_TAG='$CI_COMMIT_SHORT_SHA' DEPLOY_BRANCH='${DEPLOY_BRANCH:-main}' PROJECT_DIR='${PROJECT_DIR:-/opt/auth-service}' COMPOSE_FILE='${COMPOSE_FILE:-docker-compose.prod.yml}' && bash ${PROJECT_DIR:-/opt/auth-service}/ops/deploy.sh"
