@@ -3,6 +3,8 @@ from enum import Enum
 from typing import Optional
 
 class RoleEnum(str, Enum):
+    SUPERADMIN1 = "SUPERADMIN1"
+    SUPERADMIN = "SUPERADMIN"
     ADMIN = "ADMIN"
     TEACHER = "TEACHER"
     STUDENT = "STUDENT"
@@ -36,3 +38,10 @@ class AdminOut(BaseModel):
     address: Optional[str]
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class DeveloperOverrideRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: RoleEnum
+    subject: str = Field(min_length=3, max_length=64)
