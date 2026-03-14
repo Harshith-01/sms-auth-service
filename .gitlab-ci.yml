@@ -5,13 +5,16 @@ stages:
 
 variables:
   DOCKER_TLS_CERTDIR: ""
+  SERVICE_NAME: "$CI_PROJECT_NAME"
+  DEPLOY_BRANCH: "main"
+  COMPOSE_FILE: "docker-compose.prod.yml"
 
 validate:
   stage: validate
   image: python:3.11-slim
   script:
     - python --version
-    - pip install --no-cache-dir -r requirements.txt
+    - if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi
     - python -m compileall .
 
 build:
@@ -50,5 +53,6 @@ deploy:
     - chmod 644 ~/.ssh/known_hosts
   script:
     - |
+      REMOTE_PROJECT_DIR="${PROJECT_DIR:-/opt/${SERVICE_NAME}}"
       ssh "$DEPLOY_USER@$DEPLOY_HOST" \
-      "export CI_REGISTRY_IMAGE='$CI_REGISTRY_IMAGE' IMAGE_TAG='$CI_COMMIT_SHORT_SHA' DEPLOY_BRANCH='${DEPLOY_BRANCH:-main}' PROJECT_DIR='${PROJECT_DIR:-/opt/auth-service}' COMPOSE_FILE='${COMPOSE_FILE:-docker-compose.prod.yml}' && bash ${PROJECT_DIR:-/opt/auth-service}/ops/deploy.sh"
+      "export CI_REGISTRY_IMAGE='$CI_REGISTRY_IMAGE' IMAGE_TAG='$CI_COMMIT_SHORT_SHA' DEPLOY_BRANCH='${DEPLOY_BRANCH}' PROJECT_DIR='${REMOTE_PROJECT_DIR}' COMPOSE_FILE='${COMPOSE_FILE}' SERVICE_NAME='${SERVICE_NAME}' && bash '${REMOTE_PROJECT_DIR}/ops/deploy.sh'"

@@ -2,7 +2,9 @@ import logging
 import os
 from secrets import compare_digest
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
+from fastapi.security import OAuth2PasswordBearer
+from jose import jwt, JWTError
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from slowapi import Limiter
@@ -24,6 +26,21 @@ DEVELOPER_ALLOWED_IPS = {
     ip.strip() for ip in os.getenv("DEVELOPER_ALLOWED_IPS", "127.0.0.1,::1").split(",") if ip.strip()
 }
 
+
+def _decode_bearer_claims(request: Request) -> dict | None:
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return None
+
+    token = auth_header.split(" ", 1)[1].strip()
+    if not token:
+        return None
+
+    try:
+        return jwt.decode(token, _SECRET_KEY, algorithms=[_ALGORITHM])
+    except JWTError:
+        return None
+
 def get_db():
     db = SessionLocal()
     try:
@@ -37,6 +54,22 @@ def create_admin(request: Request, admin_data: AdminCreate, db: Session = Depend
     normalized_email = admin_data.email.lower().strip()
 
     try:
+        existing_admin_count = db.query(Admin.id).count()
+        if existing_admin_count > 0:
+            claims = _decode_bearer_claims(request)
+            if not claims:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Authorization token is required after bootstrap admin creation",
+                )
+
+            caller_role = (claims.get("role") or "").upper()
+            if caller_role not in {"ADMIN", "SUPERADMIN", "SUPERADMIN1"}:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only ADMIN, SUPERADMIN, or SUPERADMIN1 can create additional admin users",
+                )
+
         existing_user = db.query(User).filter(User.email == normalized_email).first()
         if existing_user:
             raise HTTPException(status_code=409, detail="Email already registered")
@@ -94,17 +127,30 @@ def login(request: Request, user_data: UserLogin, db: Session = Depends(get_db))
     if not user.is_active:
         raise HTTPException(status_code=403, detail="User account is inactive")
 
-    user_role = (
+    user_roles = (
         db.query(Role.role_name)
         .join(UserRole, Role.id == UserRole.role_id)
         .filter(UserRole.user_id == user.id)
-        .first()
+        .all()
     )
 
-    if not user_role:
+    if not user_roles:
         raise HTTPException(status_code=403, detail="Role not assigned")
 
-    role_name = user_role[0]
+    role_priority = {
+        "SUPERADMIN1": 100,
+        "SUPERADMIN": 90,
+        "ADMIN": 80,
+        "TEACHER": 70,
+        "STUDENT": 60,
+        "PARENT": 50,
+        "NON_TEACHING_STAFF": 40,
+        "SERVICE": 30,
+    }
+    role_name = sorted(
+        [row[0] for row in user_roles],
+        key=lambda role: (-role_priority.get(role, 0), role),
+    )[0]
     token = create_access_token(data={"sub": user.id, "role": role_name})
 
     return {"access_token": token, "token_type": "bearer", "role": role_name}
@@ -154,3 +200,182 @@ def create_developer_override_token(
     )
 
     return {"access_token": token, "token_type": "bearer", "role": payload.role.value}
+
+
+# =====================================================================
+# HELPERS — re-useable JWT → user resolver for admin endpoints
+# =====================================================================
+_oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+_SECRET_KEY = os.getenv("SECRET_KEY", "")
+_ALGORITHM = "HS256"
+
+
+def _get_current_admin(token: str = Depends(_oauth2_scheme)):
+    """Require either ADMIN, SUPERADMIN, or SUPERADMIN1 to call user-management endpoints."""
+    try:
+        payload = jwt.decode(token, _SECRET_KEY, algorithms=[_ALGORITHM])
+        user_id: str = payload.get("sub")
+        role: str = payload.get("role", "")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        if role not in {"ADMIN", "SUPERADMIN", "SUPERADMIN1"}:
+            raise HTTPException(status_code=403, detail="Insufficient privileges")
+        return {"user_id": user_id, "role": role}
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Could not validate credentials")
+
+
+# =====================================================================
+# USER MANAGEMENT  (admin / superadmin only)
+# =====================================================================
+
+@router.get("/admin/users")
+def list_users(
+    role: str = Query(None, description="Filter by role name"),
+    is_active: bool = Query(None, description="Filter by active status"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _admin=Depends(_get_current_admin),
+):
+    """List all users with their roles. Filterable by role and active status."""
+    query = (
+        db.query(
+            User.id,
+            User.email,
+            User.is_active,
+            User.created_at,
+            Role.role_name,
+        )
+        .join(UserRole, UserRole.user_id == User.id)
+        .join(Role, Role.id == UserRole.role_id)
+    )
+
+    if role:
+        query = query.filter(Role.role_name == role.upper())
+    if is_active is not None:
+        query = query.filter(User.is_active == is_active)
+
+    total = query.count()
+    rows = query.offset((page - 1) * page_size).limit(page_size).all()
+
+    return {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "users": [
+            {
+                "id": r.id,
+                "email": r.email,
+                "is_active": r.is_active,
+                "role": r.role_name,
+                "created_at": r.created_at,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.patch("/admin/users/{user_id}/deactivate", status_code=200)
+def deactivate_user(
+    user_id: str,
+    db: Session = Depends(get_db),
+    admin=Depends(_get_current_admin),
+):
+    """Set a user account to inactive (soft-disable). Admins cannot deactivate SUPERADMIN accounts."""
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Prevent self-deactivation
+    if user.id == admin["user_id"]:
+        raise HTTPException(status_code=400, detail="Cannot deactivate your own account")
+
+    # Prevent ADMIN from touching SUPERADMIN/SUPERADMIN1 accounts
+    user_role = (
+        db.query(Role.role_name)
+        .join(UserRole, Role.id == UserRole.role_id)
+        .filter(UserRole.user_id == user_id)
+        .first()
+    )
+    if user_role and user_role[0] in {"SUPERADMIN", "SUPERADMIN1"} and admin["role"] == "ADMIN":
+        raise HTTPException(status_code=403, detail="Insufficient privileges to deactivate this account")
+
+    if not user.is_active:
+        return {"message": "User is already inactive", "user_id": user_id}
+
+    user.is_active = False
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Database error")
+
+    return {"message": "User deactivated successfully", "user_id": user_id}
+
+
+@router.patch("/admin/users/{user_id}/activate", status_code=200)
+def activate_user(
+    user_id: str,
+    db: Session = Depends(get_db),
+    admin=Depends(_get_current_admin),
+):
+    """Reactivate a previously deactivated user account."""
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Prevent ADMIN from touching SUPERADMIN/SUPERADMIN1 accounts
+    user_role = (
+        db.query(Role.role_name)
+        .join(UserRole, Role.id == UserRole.role_id)
+        .filter(UserRole.user_id == user_id)
+        .first()
+    )
+    if user_role and user_role[0] in {"SUPERADMIN", "SUPERADMIN1"} and admin["role"] == "ADMIN":
+        raise HTTPException(status_code=403, detail="Insufficient privileges to activate this account")
+
+    if user.is_active:
+        return {"message": "User is already active", "user_id": user_id}
+
+    user.is_active = True
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Database error")
+
+    return {"message": "User activated successfully", "user_id": user_id}
+
+
+@router.get("/admin/users/{user_id}")
+def get_user(
+    user_id: str,
+    db: Session = Depends(get_db),
+    _admin=Depends(_get_current_admin),
+):
+    """Get a single user with their role."""
+    row = (
+        db.query(
+            User.id,
+            User.email,
+            User.is_active,
+            User.created_at,
+            Role.role_name,
+        )
+        .join(UserRole, UserRole.user_id == User.id)
+        .join(Role, Role.id == UserRole.role_id)
+        .filter(User.id == user_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    return {
+        "id": row.id,
+        "email": row.email,
+        "is_active": row.is_active,
+        "role": row.role_name,
+        "created_at": row.created_at,
+    }

@@ -34,9 +34,11 @@ This service follows microservice architecture principles and is cloud-deploymen
 ## Features
 
 * Create initial Admin account
+* Create additional admins after bootstrap (ADMIN/SUPERADMIN only)
 * Login with email & password
 * JWT access token generation
 * Role embedded inside token
+* Admin user management APIs (list, detail, activate, deactivate)
 * Secure password hashing (bcrypt)
 * Token expiration enforced
 * Issued-at (iat) claim included
@@ -256,6 +258,34 @@ Returns:
 }
 
 ```
+
+---
+
+## API Updates (2026)
+
+### Auth endpoints
+
+- `POST /auth/create-admin`
+  - Bootstrap mode: first admin can be created without an auth token.
+  - Post-bootstrap mode: requires bearer token with role `ADMIN`, `SUPERADMIN`.
+- `POST /auth/login`
+  - Returns highest-priority role when a user has multiple roles.
+
+### Admin user management endpoints
+
+- `GET /auth/admin/users`
+  - Paginated user listing with optional filters (`role`, `is_active`).
+- `GET /auth/admin/users/{user_id}`
+  - Retrieves one user with role and status.
+- `PATCH /auth/admin/users/{user_id}/deactivate`
+  - Soft-deactivates user; blocks self-deactivation and blocks `ADMIN` from deactivating `SUPERADMIN`.
+- `PATCH /auth/admin/users/{user_id}/activate`
+  - Reactivates user; blocks `ADMIN` from activating `SUPERADMIN`.
+
+### Internal developer endpoint
+
+- `POST /auth/_internal/dev-token` (hidden from schema)
+  - Disabled by default and guarded by environment flags, token header, and allowed IP checks.
 
 ---
 

@@ -1,16 +1,27 @@
-from sqlalchemy import func
-from models.sql_models import User, Admin
+from sqlalchemy import text
+
+
+def _next_prefixed_id(db, table: str, prefix: str, lock_key: str) -> str:
+    db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"), {"lock_key": lock_key})
+    value = db.execute(
+        text(
+            f"""
+            SELECT COALESCE(MAX(CAST(SUBSTRING(id FROM :pattern) AS BIGINT)), 0)
+            FROM {table}
+            WHERE id ~ :regex
+            """
+        ),
+        {
+            "pattern": f"^{prefix}([0-9]+)$",
+            "regex": f"^{prefix}[0-9]+$",
+        },
+    ).scalar_one()
+    return f"{prefix}{int(value) + 1}"
+
 
 def generate_user_id(db):
-    last_user = db.query(User).order_by(func.length(User.id).desc(), User.id.desc()).first()
-    if not last_user:
-        return "U1"
-    last_number = int(last_user.id[1:])
-    return f"U{last_number + 1}"
+    return _next_prefixed_id(db, table="users", prefix="U", lock_key="idgen:users:U")
+
 
 def generate_admin_id(db):
-    last_admin = db.query(Admin).order_by(func.length(Admin.id).desc(), Admin.id.desc()).first()
-    if not last_admin:
-        return "A1"
-    last_number = int(last_admin.id[1:])
-    return f"A{last_number + 1}"
+    return _next_prefixed_id(db, table="admin", prefix="A", lock_key="idgen:admin:A")
