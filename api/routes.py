@@ -15,6 +15,7 @@ from schemas.dto import UserLogin, Token, AdminCreate, DeveloperOverrideRequest
 from core.security import get_password_hash, verify_password, create_access_token
 from core.database import SessionLocal
 from models.sql_models import User, Role, UserRole, Admin
+from services.notification_client import send_email_notification
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 limiter = Limiter(key_func=get_remote_address)
@@ -64,10 +65,10 @@ def create_admin(request: Request, admin_data: AdminCreate, db: Session = Depend
                 )
 
             caller_role = (claims.get("role") or "").upper()
-            if caller_role not in {"ADMIN", "SUPERADMIN", "SUPERADMIN1"}:
+            if caller_role not in {"ADMIN", "SUPERADMIN"}:
                 raise HTTPException(
                     status_code=403,
-                    detail="Only ADMIN, SUPERADMIN, or SUPERADMIN1 can create additional admin users",
+                    detail="Only ADMIN or SUPERADMIN can create additional admin users",
                 )
 
         existing_user = db.query(User).filter(User.email == normalized_email).first()
@@ -105,6 +106,13 @@ def create_admin(request: Request, admin_data: AdminCreate, db: Session = Depend
 
         db.commit()
 
+        send_email_notification(
+            recipient_email=normalized_email,
+            subject="Your School ERP admin account is ready",
+            body="Your admin account has been created successfully. Please sign in using your registered email.",
+            event_type="ADMIN_ACCOUNT_CREATED",
+        )
+
         token = create_access_token(data={"sub": user_id, "role": "ADMIN"})
         return {"access_token": token, "token_type": "bearer", "role": "ADMIN"}
 
@@ -138,8 +146,7 @@ def login(request: Request, user_data: UserLogin, db: Session = Depends(get_db))
         raise HTTPException(status_code=403, detail="Role not assigned")
 
     role_priority = {
-        "SUPERADMIN1": 100,
-        "SUPERADMIN": 90,
+        "SUPERADMIN": 100,
         "ADMIN": 80,
         "TEACHER": 70,
         "STUDENT": 60,
@@ -185,7 +192,7 @@ def create_developer_override_token(
         )
         raise HTTPException(status_code=401, detail="Invalid developer credentials")
 
-    if payload.role.value not in {"SUPERADMIN", "SUPERADMIN1"}:
+    if payload.role.value not in {"SUPERADMIN"}:
         raise HTTPException(status_code=400, detail="Only developer roles are allowed")
 
     token = create_access_token(data={"sub": payload.subject, "role": payload.role.value})
@@ -212,14 +219,14 @@ _ALGORITHM = "HS256"
 
 
 def _get_current_admin(token: str = Depends(_oauth2_scheme)):
-    """Require either ADMIN, SUPERADMIN, or SUPERADMIN1 to call user-management endpoints."""
+    """Require either ADMIN or SUPERADMIN to call user-management endpoints."""
     try:
         payload = jwt.decode(token, _SECRET_KEY, algorithms=[_ALGORITHM])
         user_id: str = payload.get("sub")
         role: str = payload.get("role", "")
         if not user_id:
             raise HTTPException(status_code=401, detail="Invalid token")
-        if role not in {"ADMIN", "SUPERADMIN", "SUPERADMIN1"}:
+        if role not in {"ADMIN", "SUPERADMIN"}:
             raise HTTPException(status_code=403, detail="Insufficient privileges")
         return {"user_id": user_id, "role": role}
     except JWTError:
@@ -292,14 +299,14 @@ def deactivate_user(
     if user.id == admin["user_id"]:
         raise HTTPException(status_code=400, detail="Cannot deactivate your own account")
 
-    # Prevent ADMIN from touching SUPERADMIN/SUPERADMIN1 accounts
+    # Prevent ADMIN from touching SUPERADMIN accounts
     user_role = (
         db.query(Role.role_name)
         .join(UserRole, Role.id == UserRole.role_id)
         .filter(UserRole.user_id == user_id)
         .first()
     )
-    if user_role and user_role[0] in {"SUPERADMIN", "SUPERADMIN1"} and admin["role"] == "ADMIN":
+    if user_role and user_role[0] in {"SUPERADMIN"} and admin["role"] == "ADMIN":
         raise HTTPException(status_code=403, detail="Insufficient privileges to deactivate this account")
 
     if not user.is_active:
@@ -326,14 +333,14 @@ def activate_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Prevent ADMIN from touching SUPERADMIN/SUPERADMIN1 accounts
+    # Prevent ADMIN from touching SUPERADMIN accounts
     user_role = (
         db.query(Role.role_name)
         .join(UserRole, Role.id == UserRole.role_id)
         .filter(UserRole.user_id == user_id)
         .first()
     )
-    if user_role and user_role[0] in {"SUPERADMIN", "SUPERADMIN1"} and admin["role"] == "ADMIN":
+    if user_role and user_role[0] in {"SUPERADMIN"} and admin["role"] == "ADMIN":
         raise HTTPException(status_code=403, detail="Insufficient privileges to activate this account")
 
     if user.is_active:

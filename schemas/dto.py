@@ -1,9 +1,10 @@
-from pydantic import BaseModel, EmailStr, Field, ConfigDict
+import re
+
+from pydantic import BaseModel, EmailStr, Field, ConfigDict, field_validator
 from enum import Enum
 from typing import Optional
 
 class RoleEnum(str, Enum):
-    SUPERADMIN1 = "SUPERADMIN1"
     SUPERADMIN = "SUPERADMIN"
     ADMIN = "ADMIN"
     TEACHER = "TEACHER"
@@ -29,6 +30,21 @@ class AdminCreate(BaseModel):
     phone: Optional[str] = Field(default=None, max_length=15)
     designation: Optional[str] = Field(default=None, max_length=100)
     address: Optional[str] = Field(default=None, max_length=255)
+
+    @field_validator("password")
+    @classmethod
+    def validate_strong_password(cls, value: str) -> str:
+        if len(value) < 8:
+            raise ValueError("Password must be at least 8 characters")
+        if not re.search(r"[A-Z]", value):
+            raise ValueError("Password must include at least one uppercase letter")
+        if not re.search(r"[a-z]", value):
+            raise ValueError("Password must include at least one lowercase letter")
+        if not re.search(r"\d", value):
+            raise ValueError("Password must include at least one digit")
+        if not re.search(r"[^A-Za-z0-9]", value):
+            raise ValueError("Password must include at least one special character")
+        return value
 
 class AdminOut(BaseModel):
     id: str

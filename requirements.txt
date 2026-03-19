@@ -25,3 +25,4 @@ limits==3.11.0
 python-dotenv==1.0.1
 pydantic==2.6.4
 pydantic[email]==2.6.4
+requests==2.31.0
