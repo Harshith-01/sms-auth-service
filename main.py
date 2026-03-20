@@ -9,8 +9,14 @@ from slowapi.util import get_remote_address
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi.errors import RateLimitExceeded
 from starlette.responses import JSONResponse
+from sqlalchemy.exc import SQLAlchemyError
 
 from api.routes import router
+from core.database import Base, engine, SessionLocal
+from models.sql_models import Role
+
+# Ensure SQLAlchemy models are imported before create_all.
+from models import sql_models  # noqa: F401
 
 limiter = Limiter(key_func=get_remote_address)
 
@@ -42,6 +48,26 @@ app.add_middleware(
     TrustedHostMiddleware,
     allowed_hosts=ALLOWED_HOSTS if ALLOWED_HOSTS[0] else ["localhost", "127.0.0.1"]
 )
+
+
+@app.on_event("startup")
+def bootstrap_auth_schema() -> None:
+    """Create auth tables/roles when deploying against a fresh database."""
+    Base.metadata.create_all(bind=engine)
+
+    db = SessionLocal()
+    try:
+        required_roles = ["SUPERADMIN", "ADMIN", "TEACHER", "STUDENT", "PARENT", "NON_TEACHING_STAFF", "SERVICE"]
+        existing_roles = {row[0] for row in db.query(Role.role_name).all()}
+        for role_name in required_roles:
+            if role_name not in existing_roles:
+                db.add(Role(role_name=role_name))
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 app.include_router(router)
 
