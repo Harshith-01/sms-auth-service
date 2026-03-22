@@ -4,10 +4,21 @@
 
 BEGIN;
 
--- Ensure SUPERADMIN role is present.
+-- Ensure required roles are present.
 INSERT INTO public.roles (role_name)
-SELECT 'SUPERADMIN'
-WHERE NOT EXISTS (SELECT 1 FROM public.roles WHERE role_name = 'SUPERADMIN');
+SELECT role_name
+FROM (VALUES
+	('SUPERADMIN'),
+	('ADMIN'),
+	('TEACHER'),
+	('STUDENT'),
+	('PARENT'),
+	('NON_TEACHING_STAFF'),
+	('SERVICE')
+) AS required(role_name)
+WHERE NOT EXISTS (
+	SELECT 1 FROM public.roles r WHERE r.role_name = required.role_name
+);
 
 -- Remove legacy SUPERADMIN1 role if present.
 DELETE FROM public.user_roles
