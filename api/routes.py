@@ -257,7 +257,6 @@ def _get_current_user(token: str = Depends(_oauth2_scheme)):
 # =====================================================================
 
 @router.patch("/change-password", status_code=200)
-@limiter.limit("10/minute")
 def change_own_password(
     request: Request,
     payload: PasswordChangeRequest,
@@ -440,7 +439,6 @@ def get_user(
 
 
 @router.patch("/admin/users/{user_id}/password", status_code=200)
-@limiter.limit("20/minute")
 def admin_reset_user_password(
     request: Request,
     user_id: str,
