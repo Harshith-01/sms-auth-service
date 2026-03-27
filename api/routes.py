@@ -11,7 +11,14 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from core.id_generator import generate_user_id, generate_admin_id
-from schemas.dto import UserLogin, Token, AdminCreate, DeveloperOverrideRequest
+from schemas.dto import (
+    UserLogin,
+    Token,
+    AdminCreate,
+    DeveloperOverrideRequest,
+    PasswordChangeRequest,
+    AdminPasswordResetRequest,
+)
 from core.security import get_password_hash, verify_password, create_access_token
 from core.database import SessionLocal
 from models.sql_models import User, Role, UserRole, Admin
@@ -233,9 +240,53 @@ def _get_current_admin(token: str = Depends(_oauth2_scheme)):
         raise HTTPException(status_code=401, detail="Could not validate credentials")
 
 
+def _get_current_user(token: str = Depends(_oauth2_scheme)):
+    """Resolve authenticated user from JWT for self-service account actions."""
+    try:
+        payload = jwt.decode(token, _SECRET_KEY, algorithms=[_ALGORITHM])
+        user_id: str = payload.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return {"user_id": user_id, "role": payload.get("role", "")}
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Could not validate credentials")
+
+
 # =====================================================================
 # USER MANAGEMENT  (admin / superadmin only)
 # =====================================================================
+
+@router.patch("/change-password", status_code=200)
+@limiter.limit("10/minute")
+def change_own_password(
+    request: Request,
+    payload: PasswordChangeRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(_get_current_user),
+):
+    """Allow authenticated users to change their own password."""
+    user = db.get(User, current_user["user_id"])
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="User account is inactive")
+
+    if not verify_password(payload.current_password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+
+    if verify_password(payload.new_password, user.hashed_password):
+        raise HTTPException(status_code=400, detail="New password must be different from current password")
+
+    user.hashed_password = get_password_hash(payload.new_password)
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Database error")
+
+    return {"message": "Password updated successfully"}
+
 
 @router.get("/admin/users")
 def list_users(
@@ -386,3 +437,41 @@ def get_user(
         "role": row.role_name,
         "created_at": row.created_at,
     }
+
+
+@router.patch("/admin/users/{user_id}/password", status_code=200)
+@limiter.limit("20/minute")
+def admin_reset_user_password(
+    request: Request,
+    user_id: str,
+    payload: AdminPasswordResetRequest,
+    db: Session = Depends(get_db),
+    admin=Depends(_get_current_admin),
+):
+    """Allow ADMIN/SUPERADMIN to set a new password for any user account."""
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user_roles = {
+        row[0]
+        for row in db.query(Role.role_name)
+        .join(UserRole, Role.id == UserRole.role_id)
+        .filter(UserRole.user_id == user_id)
+        .all()
+    }
+
+    if "SUPERADMIN" in user_roles and admin["role"] == "ADMIN":
+        raise HTTPException(status_code=403, detail="Insufficient privileges to change this user's password")
+
+    if verify_password(payload.new_password, user.hashed_password):
+        raise HTTPException(status_code=400, detail="New password must be different from current password")
+
+    user.hashed_password = get_password_hash(payload.new_password)
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Database error")
+
+    return {"message": "Password updated successfully", "user_id": user_id}
