@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -20,6 +20,7 @@ from schemas.dto import (
     AdminPasswordResetRequest,
 )
 from core.security import get_password_hash, verify_password, create_access_token
+from core.db_errors import db_integrity_http_exception
 from core.database import SessionLocal
 from models.sql_models import User, Role, UserRole, Admin
 from services.notification_client import send_email_notification
@@ -126,6 +127,10 @@ def create_admin(request: Request, admin_data: AdminCreate, db: Session = Depend
     except HTTPException:
         db.rollback()
         raise
+
+    except IntegrityError as exc:
+        db.rollback()
+        raise db_integrity_http_exception(exc, fallback_status=409, fallback_detail="Failed to create admin")
 
     except SQLAlchemyError:
         db.rollback()
@@ -280,6 +285,9 @@ def change_own_password(
     user.hashed_password = get_password_hash(payload.new_password)
     try:
         db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise db_integrity_http_exception(exc, fallback_status=400, fallback_detail="Could not update password")
     except SQLAlchemyError:
         db.rollback()
         raise HTTPException(status_code=500, detail="Database error")
@@ -365,6 +373,9 @@ def deactivate_user(
     user.is_active = False
     try:
         db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise db_integrity_http_exception(exc, fallback_status=409, fallback_detail="Could not deactivate user")
     except SQLAlchemyError:
         db.rollback()
         raise HTTPException(status_code=500, detail="Database error")
@@ -399,6 +410,9 @@ def activate_user(
     user.is_active = True
     try:
         db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise db_integrity_http_exception(exc, fallback_status=409, fallback_detail="Could not activate user")
     except SQLAlchemyError:
         db.rollback()
         raise HTTPException(status_code=500, detail="Database error")
@@ -468,6 +482,9 @@ def admin_reset_user_password(
     user.hashed_password = get_password_hash(payload.new_password)
     try:
         db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise db_integrity_http_exception(exc, fallback_status=400, fallback_detail="Could not update password")
     except SQLAlchemyError:
         db.rollback()
         raise HTTPException(status_code=500, detail="Database error")
