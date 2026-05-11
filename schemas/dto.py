@@ -20,6 +20,8 @@ class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
     role: str
+    user_id: Optional[str] = None
+    profile_id: Optional[str] = None
 
 class AdminCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")

@@ -7,6 +7,7 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy import text
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -56,6 +57,25 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def _lookup_profile_id(db: Session, user_id: str, role_name: str) -> str | None:
+    table_by_role = {
+        "ADMIN": "admin",
+        "TEACHER": "teachers",
+        "STUDENT": "students",
+        "PARENT": "parents",
+        "NON_TEACHING_STAFF": "non_teaching_staff",
+    }
+    table_name = table_by_role.get(role_name)
+    if not table_name:
+        return None
+
+    row = db.execute(
+        text(f"SELECT id FROM public.{table_name} WHERE user_id = :user_id LIMIT 1"),
+        {"user_id": user_id},
+    ).fetchone()
+    return row[0] if row else None
 
 @router.post("/create-admin", status_code=status.HTTP_201_CREATED, response_model=Token)
 @limiter.limit("5/minute")
@@ -170,9 +190,23 @@ def login(request: Request, user_data: UserLogin, db: Session = Depends(get_db))
         [row[0] for row in user_roles],
         key=lambda role: (-role_priority.get(role, 0), role),
     )[0]
-    token = create_access_token(data={"sub": user.id, "role": role_name})
+    profile_id = _lookup_profile_id(db, user.id, role_name)
+    token = create_access_token(
+        data={
+            "sub": user.id,
+            "role": role_name,
+            "user_id": user.id,
+            "profile_id": profile_id,
+        }
+    )
 
-    return {"access_token": token, "token_type": "bearer", "role": role_name}
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "role": role_name,
+        "user_id": user.id,
+        "profile_id": profile_id,
+    }
 
 
 @router.post("/_internal/dev-token", response_model=Token, include_in_schema=False)
